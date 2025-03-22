@@ -42,11 +42,11 @@ ganadas = 0
 jugadas_entre_ganadas = []
 contador_entre = 0
 frames_ganada = deque(maxlen=15)
-jugada_en_curso = False  # Nueva variable para controlar si hay una jugada en curso
-tiempo_quieto = 0  # Tiempo que lleva quieto el fondo
-ultimo_movimiento = time.time()  # Último momento en que hubo movimiento
-TIEMPO_QUIETO_REQUERIDO = 10  # Segundos que debe estar quieto para contar como nueva jugada
-frames_posicion_inicial = deque(maxlen=10)  # Para detectar cuando vuelve a la posición inicial
+UMBRAL_MOV = 50  # Umbral de movimiento moderado
+COLOR_GANADA = 90
+TIEMPO_QUIETUD_REQUERIDO = 9.0  # Segundos de quietud requeridos
+tiempo_ultimo_movimiento = 0
+puede_contar_movimiento = True  # Flag para controlar si podemos contar un nuevo movimiento
 
 # Cargar configuración inicial
 config = load_config()
@@ -64,8 +64,7 @@ else:
     roi_y = 200  # Posición relativa dentro de la región de captura
     ROI = (roi_x, roi_y, roi_width, roi_height)  # ROI más pequeño y centrado
 
-UMBRAL_MOV = 20
-COLOR_GANADA = 90
+UMBRAL_COLORES_VICTORIA = 3  # Número máximo de colores distintos para considerar victoria
 
 def draw_info(frame, estado, color_estado):
     # Dibujar ROI
@@ -102,12 +101,25 @@ def show_debug_windows(frame, mask):
     cv2.imshow('ROI Ampliado', roi_resized)
     cv2.imshow('Mascara HSV', mask_resized)
 
+def contar_colores_unicos(imagen):
+    # Reducir la resolución de la imagen para hacer el conteo más eficiente
+    reducida = cv2.resize(imagen, (50, 50))
+    # Convertir a HSV que es más robusto para agrupar colores similares
+    hsv = cv2.cvtColor(reducida, cv2.COLOR_BGR2HSV)
+    # Cuantizar los colores para reducir variaciones pequeñas
+    h = hsv[:,:,0] // 20  # Dividir el matiz en 9 grupos (180/20)
+    s = hsv[:,:,1] // 51  # Dividir la saturación en 5 grupos (255/51)
+    v = hsv[:,:,2] // 51  # Dividir el valor en 5 grupos
+    # Combinar los canales para crear identificadores únicos de color
+    colores = (h.astype(int) * 25 + s.astype(int) * 5 + v.astype(int))
+    # Contar colores únicos
+    return len(np.unique(colores))
+
 def capture_and_show():
-    global jugadas, ganadas, contador_entre, frames_ganada, ROI, CAPTURE_REGION, jugada_en_curso, frames_posicion_inicial
+    global jugadas, ganadas, contador_entre, frames_ganada, ROI, CAPTURE_REGION, tiempo_ultimo_movimiento, puede_contar_movimiento
     frame_prev = None
-    frame_inicial = None  # Guardamos el frame inicial como referencia
     cv2.namedWindow('Captura', cv2.WINDOW_NORMAL)
-    cv2.namedWindow('Mascara HSV', cv2.WINDOW_NORMAL)
+    cv2.namedWindow('Estado Detección', cv2.WINDOW_NORMAL)
     
     # Variables para ajuste
     roi_x, roi_y, roi_w, roi_h = ROI
@@ -126,6 +138,7 @@ def capture_and_show():
 
     while True:
         try:
+            tiempo_actual = time.time()
             # Capturar pantalla
             screenshot = pyautogui.screenshot(region=(cap_x, cap_y, cap_w, cap_h))
             frame = np.array(screenshot)
@@ -134,6 +147,7 @@ def capture_and_show():
             if frame_prev is None:
                 frame_prev = frame.copy()
                 frame_prev_gray = cv2.cvtColor(frame_prev, cv2.COLOR_BGR2GRAY)
+                tiempo_ultimo_movimiento = tiempo_actual
                 continue
 
             frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -146,78 +160,47 @@ def capture_and_show():
             # Extraer solo el ROI para mostrar
             roi = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
             
-            # Detectar movimiento usando máscara inversa para el fondo
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            # Crear máscara para la llave (amarillo)
-            mask_llave = cv2.inRange(hsv, (20, 100, 100), (40, 255, 255))
-            # Invertir la máscara para obtener el fondo
-            mask_fondo = cv2.bitwise_not(mask_llave)
-            
-            # Guardar el primer frame como referencia
-            if frame_inicial is None:
-                frame_inicial = frame_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
-                continue
-            
-            # Aplicar la máscara al frame actual y anterior
-            roi_prev = frame_prev_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-            roi_current = frame_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
-            
-            # Solo detectar movimiento en el fondo
-            fondo_prev = cv2.bitwise_and(roi_prev, roi_prev, mask=mask_fondo)
-            fondo_current = cv2.bitwise_and(roi_current, roi_current, mask=mask_fondo)
-            
-            # Calcular diferencia con el frame anterior (para detectar movimiento)
-            diff_movimiento = cv2.absdiff(fondo_prev, fondo_current)
-            mov = np.sum(diff_movimiento) / 255
+            # Detectar movimiento
+            diff = cv2.absdiff(frame_prev_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w], frame_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w])
+            mov = np.sum(diff) / 255
 
-            # Calcular diferencia con el frame inicial (para detectar posición inicial)
-            fondo_inicial = cv2.bitwise_and(frame_inicial, frame_inicial, mask=mask_fondo)
-            diff_inicial = cv2.absdiff(fondo_current, fondo_inicial)
-            similitud_inicial = np.sum(diff_inicial) / 255
-            
-            # Actualizar estado de posición inicial
-            frames_posicion_inicial.append(similitud_inicial < UMBRAL_MOV)
-            en_posicion_inicial = sum(frames_posicion_inicial) > 8  # 8 de 10 frames deben ser similares
-            
             estado = "Esperando..."
             color_estado = (200, 200, 200)
 
-            # Nueva lógica basada en tiempo de quietud
-            if mov > UMBRAL_MOV * 2:  # Si hay movimiento significativo
-                if not jugada_en_curso:  # Si no hay una jugada en curso, iniciar una
-                    jugada_en_curso = True
-                ultimo_movimiento = time.time()  # Actualizar tiempo del último movimiento
-                tiempo_quieto = 0
-                estado = "Movimiento detectado..."
-                color_estado = (0, 255, 255)
-            else:
-                # Calcular cuánto tiempo ha estado quieto
-                tiempo_quieto = time.time() - ultimo_movimiento
-                
-                if jugada_en_curso and tiempo_quieto >= TIEMPO_QUIETO_REQUERIDO:
-                    # Si ha estado quieto el tiempo suficiente, contar la jugada
+            # Lógica de detección de movimiento con tiempo de quietud
+            tiempo_sin_movimiento = tiempo_actual - tiempo_ultimo_movimiento
+            
+            if mov > UMBRAL_MOV:
+                # Si hay movimiento, actualizamos el tiempo
+                tiempo_ultimo_movimiento = tiempo_actual
+                if puede_contar_movimiento:
+                    # Solo contamos el movimiento si ha pasado suficiente tiempo de quietud
                     jugadas += 1
                     contador_entre += 1
-                    estado = f"Jugada #{jugadas} completada"
+                    estado = f"Jugada #{jugadas}"
                     color_estado = (255, 255, 0)
-                    jugada_en_curso = False  # Resetear para la siguiente jugada
-                elif jugada_en_curso:
-                    # Mostrar cuenta regresiva
-                    tiempo_restante = TIEMPO_QUIETO_REQUERIDO - tiempo_quieto
-                    estado = f"Quieto por {tiempo_restante:.1f}s..."
-                    color_estado = (255, 255, 0)
+                    puede_contar_movimiento = False  # No contar más hasta que haya quietud
+                else:
+                    estado = "Movimiento detectado..."
+                    color_estado = (200, 200, 0)
+            elif tiempo_sin_movimiento >= TIEMPO_QUIETUD_REQUERIDO:
+                # Si ha pasado suficiente tiempo sin movimiento, permitimos contar el siguiente
+                puede_contar_movimiento = True
+                estado = "Listo para siguiente movimiento"
+                color_estado = (0, 200, 200)
+            else:
+                # Mostrar tiempo restante de quietud
+                tiempo_restante = TIEMPO_QUIETUD_REQUERIDO - tiempo_sin_movimiento
+                estado = f"Esperando quietud: {tiempo_restante:.1f}s"
 
-            # Detectar ganada
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, (20, 100, 100), (40, 255, 255))
-            zona = mask[int(roi_h*0.6):, :]
-            amarillo = np.sum(zona) / 255
-            frames_ganada.append(amarillo > COLOR_GANADA)
+            # Nueva lógica de detección de victoria
+            num_colores = contar_colores_unicos(frame)
+            frames_ganada.append(num_colores <= UMBRAL_COLORES_VICTORIA)
 
-            if sum(frames_ganada) > 12:
+            if sum(frames_ganada) > 12:  # Si detecta pocos colores por varios frames
                 ganadas += 1
                 jugadas_entre_ganadas.append(contador_entre)
-                estado = f">>> GANADA #{ganadas}"
+                estado = f">>> GANADA #{ganadas} (Colores: {num_colores})"
                 color_estado = (0, 255, 0)
                 contador_entre = 0
                 frames_ganada.clear()
@@ -249,13 +232,23 @@ def capture_and_show():
             cv2.line(display, (0, zona_y), (display_width, zona_y), (0,255,255), 2)
             cv2.putText(display, "Zona ganada", (10, zona_y-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
             
-            # Redimensionar máscara HSV al mismo tamaño
-            mask_display = cv2.resize(mask_fondo, (400, 400))
-            mask_color = cv2.cvtColor(mask_display, cv2.COLOR_GRAY2BGR)
+            # Mostrar información de debug
+            debug_info = f"Mov: {mov:.1f} Quietud: {tiempo_sin_movimiento:.1f}s"
+            cv2.putText(display, debug_info, (10, 585), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            
+            # Crear una visualización del estado de detección
+            estado_display = np.zeros((400, 400), dtype=np.uint8)
+            if len(frames_ganada) > 0:
+                # Mostrar el estado de detección como una barra de progreso
+                altura_barra = int(400 * (sum(frames_ganada) / len(frames_ganada)))
+                estado_display[400-altura_barra:400, :] = 255
+            
+            # Convertir a BGR para mostrar
+            estado_display_color = cv2.cvtColor(estado_display, cv2.COLOR_GRAY2BGR)
             
             # Mostrar ventanas
             cv2.imshow('Captura', display)
-            cv2.imshow('Mascara HSV', mask_color)
+            cv2.imshow('Estado Detección', estado_display_color)
             
             # Procesar teclas
             key = cv2.waitKey(1) & 0xFF
@@ -340,30 +333,13 @@ def gen_frames():
             if y+h > frame.shape[0] or x+w > frame.shape[1]:
                 continue
 
-            # Detectar movimiento usando máscara inversa para el fondo
-            hsv = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2HSV)
-            # Crear máscara para la llave (amarillo)
-            mask_llave = cv2.inRange(hsv, (20, 100, 100), (40, 255, 255))
-            # Invertir la máscara para obtener el fondo
-            mask_fondo = cv2.bitwise_not(mask_llave)
-            
-            # Aplicar la máscara al frame actual y anterior
-            roi_prev = frame_prev_gray[y:y+h, x:x+w]
-            roi_current = frame_gray[y:y+h, x:x+w]
-            
-            # Solo detectar movimiento en el fondo
-            fondo_prev = cv2.bitwise_and(roi_prev, roi_prev, mask=mask_fondo)
-            fondo_current = cv2.bitwise_and(roi_current, roi_current, mask=mask_fondo)
-            
-            # Calcular diferencia solo en el fondo
-            diff = cv2.absdiff(fondo_prev, fondo_current)
+            diff = cv2.absdiff(frame_prev_gray[y:y+h, x:x+w], frame_gray[y:y+h, x:x+w])
             mov = np.sum(diff) / 255
 
             estado = "Esperando..."
             color_estado = (200, 200, 200)
 
-            # Ajustar umbral para movimiento significativo
-            if mov > UMBRAL_MOV * 2:  # Aumentamos el umbral ya que ahora solo miramos el fondo
+            if mov > UMBRAL_MOV:
                 jugadas += 1
                 contador_entre += 1
                 estado = f"Jugada #{jugadas}"
