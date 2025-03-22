@@ -42,7 +42,7 @@ ganadas = 0
 jugadas_entre_ganadas = []
 contador_entre = 0
 frames_ganada = deque(maxlen=15)
-UMBRAL_MOV = 50  # Umbral de movimiento moderado
+UMBRAL_MOV = 300  # Aumentamos significativamente el umbral de movimiento
 COLOR_GANADA = 90
 TIEMPO_QUIETUD_REQUERIDO = 9.0  # Segundos de quietud requeridos
 tiempo_ultimo_movimiento = 0
@@ -76,11 +76,6 @@ def draw_info(frame, estado, color_estado):
     cv2.putText(frame, f"Jugadas: {jugadas}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
     cv2.putText(frame, f"Ganadas: {ganadas}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
     cv2.putText(frame, f"Jugadas desde última ganada: {contador_entre}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-    
-    # Dibujar zona de detección de ganada
-    zona_y = y + int(h*0.6)
-    cv2.line(frame, (x, zona_y), (x+w, zona_y), (0,255,255), 2)
-    cv2.putText(frame, "Zona detección ganada", (x+w+5, zona_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255), 1)
 
 def show_debug_windows(frame, mask):
     x, y, w, h = ROI
@@ -118,6 +113,7 @@ def contar_colores_unicos(imagen):
 def capture_and_show():
     global jugadas, ganadas, contador_entre, frames_ganada, ROI, CAPTURE_REGION, tiempo_ultimo_movimiento, puede_contar_movimiento
     frame_prev = None
+    roi_prev = None  # Para guardar solo el ROI anterior
     cv2.namedWindow('Captura', cv2.WINDOW_NORMAL)
     cv2.namedWindow('Estado Detección', cv2.WINDOW_NORMAL)
     
@@ -143,25 +139,23 @@ def capture_and_show():
             screenshot = pyautogui.screenshot(region=(cap_x, cap_y, cap_w, cap_h))
             frame = np.array(screenshot)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-            if frame_prev is None:
-                frame_prev = frame.copy()
-                frame_prev_gray = cv2.cvtColor(frame_prev, cv2.COLOR_BGR2GRAY)
-                tiempo_ultimo_movimiento = tiempo_actual
-                continue
-
-            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
             # Verificar límites
             if roi_y+roi_h > frame.shape[0] or roi_x+roi_w > frame.shape[1]:
                 print(f"ROI fuera de límites: frame shape={frame.shape}, ROI=({roi_x}, {roi_y}, {roi_w}, {roi_h})")
                 continue
 
-            # Extraer solo el ROI para mostrar
+            # Extraer solo el ROI para mostrar y procesar
             roi = frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w].copy()
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+            if roi_prev is None:
+                roi_prev = roi_gray.copy()
+                tiempo_ultimo_movimiento = tiempo_actual
+                continue
             
-            # Detectar movimiento
-            diff = cv2.absdiff(frame_prev_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w], frame_gray[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w])
+            # Detectar movimiento solo en el ROI
+            diff = cv2.absdiff(roi_prev, roi_gray)
             mov = np.sum(diff) / 255
 
             estado = "Esperando..."
@@ -193,6 +187,8 @@ def capture_and_show():
                 tiempo_restante = TIEMPO_QUIETUD_REQUERIDO - tiempo_sin_movimiento
                 estado = f"Esperando quietud: {tiempo_restante:.1f}s"
 
+            roi_prev = roi_gray.copy()
+
             # Nueva lógica de detección de victoria
             num_colores = contar_colores_unicos(frame)
             frames_ganada.append(num_colores <= UMBRAL_COLORES_VICTORIA)
@@ -205,10 +201,8 @@ def capture_and_show():
                 contador_entre = 0
                 frames_ganada.clear()
 
-            frame_prev_gray = frame_gray.copy()
-
             # Crear una imagen más grande para mostrar la información
-            display_height = 600
+            display_height = 750  # Aumentamos más la altura
             display_width = 400
             display = np.zeros((display_height, display_width, 3), dtype=np.uint8)
             
@@ -218,23 +212,22 @@ def capture_and_show():
             
             # Dibujar información en la parte inferior con texto más grande
             cv2.putText(display, estado, (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color_estado, 2)
-            cv2.putText(display, f"Jugadas: {jugadas}", (10, 510), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2)
-            cv2.putText(display, f"Ganadas: {ganadas}", (10, 560), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
+            cv2.putText(display, f"Jugadas: {jugadas}", (10, 520), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2)
+            cv2.putText(display, f"Ganadas: {ganadas}", (10, 580), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 2)
+            
+            # Hacer el contador de colores más grande y visible
+            cv2.putText(display, "Colores detectados:", (10, 640), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0,255,255), 2)
+            cv2.putText(display, str(num_colores), (10, 690), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0,255,255), 3)
             
             # Mostrar mensaje temporal si existe
             if mensaje_temporal and time.time() - tiempo_mensaje < 3:  # Mostrar mensaje por 3 segundos
-                cv2.putText(display, mensaje_temporal, (10, 585), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                cv2.putText(display, mensaje_temporal, (10, 735), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
             else:
                 mensaje_temporal = None
             
-            # Dibujar línea de detección
-            zona_y = int(400 * 0.6)
-            cv2.line(display, (0, zona_y), (display_width, zona_y), (0,255,255), 2)
-            cv2.putText(display, "Zona ganada", (10, zona_y-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,255), 2)
-            
             # Mostrar información de debug
             debug_info = f"Mov: {mov:.1f} Quietud: {tiempo_sin_movimiento:.1f}s"
-            cv2.putText(display, debug_info, (10, 585), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+            cv2.putText(display, debug_info, (10, 735), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
             
             # Crear una visualización del estado de detección
             estado_display = np.zeros((400, 400), dtype=np.uint8)
